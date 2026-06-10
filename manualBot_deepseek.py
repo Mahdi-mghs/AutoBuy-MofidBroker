@@ -212,8 +212,8 @@ def buy_click_robust(driver):
 
 # ---------- Main Workflow ----------
 def main():
-    USERNAME = "1051047595"
-    PASSWORD = "1051047595Ma"
+    USERNAME = ""
+    PASSWORD = ""
     # SYMBOL = "فولاد"   # not used because you prepare manually
     target_time = dt_time(8, 44, 58)
 
