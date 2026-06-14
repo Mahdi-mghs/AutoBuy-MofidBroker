@@ -70,7 +70,7 @@ def buy_click_robust(driver) -> tuple[bool, str]:
         logger.info("Buy button clicked (after re-find), waiting for broker response...")
 
     # Use a longer timeout for notification — the broker toast can be slow
-    broker_message = capture_broker_notification(driver, timeout=3)
+    broker_message = capture_broker_notification(driver, timeout=2)
     logger.info("Broker response: %r", broker_message)
     success = is_order_accepted(broker_message)
 

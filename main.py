@@ -13,9 +13,8 @@ import signal
 import sys
 import time
 from datetime import time as dt_time
-from venv import logger
 
-from config import LOG_LEVEL, LOG_FILE, USERNAME, PASSWORD
+from config import LOG_LEVEL, LOG_FILE, USERNAME, PASSWORD, DEFAULT_BUY_TIME, INSTANCE_ID, SYMBOL
 from driver import initialize_driver, cleanup_all
 from broker import login, dismiss_announcement, wait_until_broker_time, get_broker_time
 from order import execute_buy
@@ -73,8 +72,8 @@ Examples:
     parser.add_argument(
         "--time", "-t",
         type=parse_time_arg,
-        required=True,
-        help="Target broker clock time to click buy (HH:MM or HH:MM:SS)",
+        required=False,
+        help="Target broker clock time to click buy (HH:MM or HH:MM:SS). Default: from DEFAULT_BUY_TIME env var (08:44:58)",
     )
     parser.add_argument(
         "--verify-order",
@@ -113,14 +112,16 @@ def main():
     logger = logging.getLogger("main")
     args = parse_args()
 
-    target_time: dt_time = args.time
+    target_time: dt_time = args.time if args.time is not None else parse_time_arg(DEFAULT_BUY_TIME)
     verify = args.verify_order and not args.no_verify
 
     # Register signal handler for Ctrl+C BEFORE anything else
     signal.signal(signal.SIGINT, _signal_handler)
 
+    instance_info = f" (instance: {INSTANCE_ID})" if INSTANCE_ID else ""
+    symbol_info = f" - Symbol: {SYMBOL}" if SYMBOL else ""
     logger.info("=" * 60)
-    logger.info("AutoBuy-MofidBroker starting")
+    logger.info("AutoBuy-MofidBroker starting%s%s", instance_info, symbol_info)
     logger.info("Target time : %s", target_time.strftime("%H:%M:%S"))
     logger.info("Verify order: %s", verify)
     logger.info("=" * 60)
@@ -186,26 +187,26 @@ def main():
         success = execute_buy(driver)
 
         if success:
-            logger.info("🎉 Trade completed successfully.")
+            logger.info("🎉 Trade completed successfully%s.", instance_info)
         else:
-            logger.error("💥 Trade failed. Check the browser manually.")
+            logger.error("💥 Trade failed%s. Check the browser manually.", instance_info)
 
     except KeyboardInterrupt:
-        logger.info("Interrupted by user (Ctrl+C).")
+        logger.info("Interrupted by user (Ctrl+C)%s.", instance_info)
     except TimeoutError as e:
-        logger.error("Timeout: %s", e)
+        logger.error("Timeout%s: %s", instance_info, e)
     except Exception as e:
-        logger.exception("Unexpected error: %s", e)
+        logger.exception("Unexpected error%s: %s", instance_info, e)
     finally:
         # Allow user to inspect, but in small sleep chunks so Ctrl+C can break through
         if not _shutdown_requested:
-            logger.info("Keeping browser open for 10 seconds for inspection (Ctrl+C to close now)...")
+            logger.info("Keeping browser open for 10 seconds for inspection (Ctrl+C to close now)%s...", instance_info)
             for _ in range(20):  # 20 × 0.5s = 10s, but interruptible
                 if _shutdown_requested:
                     break
                 time.sleep(0.5)
         cleanup_all()
-        logger.info("Done.")
+        logger.info("Done%s.", instance_info)
 
 
 if __name__ == "__main__":

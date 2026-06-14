@@ -14,6 +14,7 @@ if env_path.exists():
 
 # ── Broker ──────────────────────────────────────────────
 BROKER_URL = os.getenv("BROKER_URL", "https://d.easytrader.ir/")
+SYMBOL = os.getenv("SYMBOL", "")
 USERNAME = os.getenv("MOFID_USER", "")
 PASSWORD = os.getenv("MOFID_PASS", "")
 
@@ -22,6 +23,10 @@ CHROMEDRIVER_PATH = os.getenv(
     "CHROMEDRIVER_PATH",
     r"C:\Users\Mahdi\.cache\selenium\chromedriver\win64\148.0.7778.97\chromedriver.exe",
 )
+CHROME_USER_DATA_DIR = os.getenv("CHROME_USER_DATA_DIR", "")
+HEADLESS = os.getenv("HEADLESS", "false").lower() == "true"
+INSTANCE_ID = os.getenv("INSTANCE_ID", "")
+
 
 # ── Timeouts (seconds) ──────────────────────────────────
 DEFAULT_TIMEOUT = int(os.getenv("DEFAULT_TIMEOUT", "20"))
@@ -37,6 +42,8 @@ BUY_RETRY_INTERVAL = float(os.getenv("BUY_RETRY_INTERVAL", "0.15"))
 CLOCK_POLL_INTERVAL = float(os.getenv("CLOCK_POLL_INTERVAL", "0.05"))
 # Safety: give up waiting for broker time after this many seconds
 CLOCK_DEADLINE_SECONDS = int(os.getenv("CLOCK_DEADLINE_SECONDS", "3600"))
+# Default target time if --time not provided (HH:MM:SS)
+DEFAULT_BUY_TIME = os.getenv("DEFAULT_BUY_TIME", "08:44:58")
 
 # ── Logging ─────────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

@@ -8,7 +8,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 
-from config import CHROMEDRIVER_PATH
+from config import CHROMEDRIVER_PATH, CHROME_USER_DATA_DIR, HEADLESS, INSTANCE_ID
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,16 @@ def initialize_driver() -> webdriver.Chrome:
     # detach=True keeps Chrome alive even after the Python process exits,
     # which prevents Ctrl+C from closing the browser.
     options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
+    
+    # Add Chrome user data directory for multi-instance support
+    if CHROME_USER_DATA_DIR:
+        options.add_argument(f"--user-data-dir={CHROME_USER_DATA_DIR}")
+        logger.info("Using Chrome user data dir: %s", CHROME_USER_DATA_DIR)
+    
+    # Add headless mode if specified
+    if HEADLESS:
+        options.add_argument("--headless")
+        logger.info("Running in headless mode")
 
     logger.info("Initializing ChromeDriver from %s", CHROMEDRIVER_PATH)
     service = Service(executable_path=CHROMEDRIVER_PATH)
@@ -34,7 +44,8 @@ def initialize_driver() -> webdriver.Chrome:
 
     _active_drivers.append(driver)
     atexit.register(_quit_driver, driver)
-    logger.info("Driver initialized and cleanup registered.")
+    instance_info = f" (instance: {INSTANCE_ID})" if INSTANCE_ID else ""
+    logger.info("Driver initialized%s and cleanup registered.", instance_info)
     return driver
 
 
