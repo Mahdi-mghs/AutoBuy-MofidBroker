@@ -1,7 +1,9 @@
 # AutoBuy-MofidBroker
 
-Automated buy bot for Mofid Securities (EasyTrader platform).  
+Automated buy bot for Mofid Securities (EasyTrader platform).
 Waits for a precise broker clock time, then clicks the buy button repeatedly until accepted.
+
+TIP: you can check Persian Document [here](https://github.com/Mahdi-mghs/AutoBuy-MofidBroker/blob/main/README-FA.md)
 
 ---
 
@@ -25,14 +27,17 @@ pip install -r requirements.txt
 
 ### ChromeDriver
 
-This project uses a **local ChromeDriver** (offline-friendly).  
-Edit `.env` to point to your driver:
+This project uses a **local ChromeDriver** (offline-friendly) with a fallback.
+
+**Priority:**
+1. Uses `CHROMEDRIVER_PATH` if the file exists
+2. Falls back to `webdriver-manager` if local driver is missing
 
 ```
-CHROMEDRIVER_PATH=C:\Users\Mahdi\.cache\selenium\chromedriver\win64\148.0.7778.97\chromedriver.exe
+CHROMEDRIVER_PATH=C:\Users\[USERNAME]\.cache\selenium\chromedriver\win64\[LastVersion]\chromedriver.exe
 ```
 
-If your driver is on your `PATH`, leave this empty and it will auto-discover.
+If the local path is invalid or missing, the script will automatically download the latest compatible driver (requires internet).
 
 ---
 
@@ -129,8 +134,8 @@ Log format:
 
 ## Warning
 
-This tool automates sensitive financial operations.  
-Test thoroughly in a safe environment before trading real money.  
+This tool automates sensitive financial operations.
+Test thoroughly in a safe environment before trading real money.
 Use at your own risk.
 
 ---
