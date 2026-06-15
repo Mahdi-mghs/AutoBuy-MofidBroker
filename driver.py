@@ -4,6 +4,7 @@ ChromeDriver setup with guaranteed cleanup.
 
 import atexit
 import logging
+import os
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -18,6 +19,7 @@ _active_drivers: list[webdriver.Chrome] = []
 
 def initialize_driver() -> webdriver.Chrome:
     """Create and return a configured ChromeDriver instance.
+    Uses local CHROMEDRIVER_PATH if it exists, otherwise falls back to webdriver-manager.
     The driver is registered for automatic cleanup on process exit.
     """
     options = Options()
@@ -26,19 +28,33 @@ def initialize_driver() -> webdriver.Chrome:
     # detach=True keeps Chrome alive even after the Python process exits,
     # which prevents Ctrl+C from closing the browser.
     options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
-    
+
     # Add Chrome user data directory for multi-instance support
     if CHROME_USER_DATA_DIR:
         options.add_argument(f"--user-data-dir={CHROME_USER_DATA_DIR}")
         logger.info("Using Chrome user data dir: %s", CHROME_USER_DATA_DIR)
-    
+
     # Add headless mode if specified
     if HEADLESS:
         options.add_argument("--headless")
         logger.info("Running in headless mode")
 
-    logger.info("Initializing ChromeDriver from %s", CHROMEDRIVER_PATH)
-    service = Service(executable_path=CHROMEDRIVER_PATH)
+    # Choose driver: local path first, then webdriver-manager fallback
+    if CHROMEDRIVER_PATH and os.path.exists(CHROMEDRIVER_PATH):
+        logger.info("Using local ChromeDriver: %s", CHROMEDRIVER_PATH)
+        service = Service(executable_path=CHROMEDRIVER_PATH)
+    else:
+        logger.info("Local ChromeDriver not found, falling back to webdriver-manager...")
+        try:
+            from webdriver_manager.chrome import ChromeDriverManager
+            service = Service(executable_path=ChromeDriverManager().install())
+        except ImportError:
+            logger.error(
+                "webdriver-manager not installed and no local driver found. "
+                "Install with: pip install webdriver-manager OR set CHROMEDRIVER_PATH in .env"
+            )
+            raise
+
     driver = webdriver.Chrome(service=service, options=options)
     driver.maximize_window()
 
