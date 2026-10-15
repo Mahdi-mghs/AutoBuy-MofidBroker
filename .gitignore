@@ -16,3 +16,16 @@ venv/
 # IDE
 .vscode/
 .idea/
+# Freebuff desktop bookkeeping (local, not project code)
+.freebuff/
+# probe/debug helpers are repo utilities but we keep them explicit
+
+# coverage / IDE / left-overs
+.coverage
+htmlcov/
+coverage.xml
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+MANIFEST.in
