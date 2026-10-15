@@ -4,6 +4,9 @@
 # Logs
 autobuy.log
 
+# Test artifacts (smoke-test screenshots, DOM dumps, discovery profile)
+artifacts/
+
 # Python
 __pycache__/
 *.pyc

@@ -1,81 +1,117 @@
 """
-ChromeDriver setup with guaranteed cleanup.
+Browser setup (Playwright) with guaranteed cleanup.
+
+Uses the installed Google Chrome via Playwright's channel support —
+no chromedriver, no webdriver-manager, no version hunting.
 """
 
 import atexit
 import logging
-import os
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 
-from config import CHROMEDRIVER_PATH, CHROME_USER_DATA_DIR, HEADLESS, INSTANCE_ID
+from playwright.sync_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    Playwright,
+    sync_playwright,
+)
+
+from config import CHROME_USER_DATA_DIR, HEADLESS, INSTANCE_ID
 
 logger = logging.getLogger(__name__)
 
-# Track all drivers created so we can clean them up on exit
-_active_drivers: list[webdriver.Chrome] = []
+# The site shows a <size-warning> overlay below the lg breakpoint (1024px)
+# that intercepts ALL clicks — keep the viewport comfortably above it.
+VIEWPORT = {"width": 1600, "height": 1000}
+
+# Track active sessions so we can clean them up on exit.
+# Each entry is a dict with a `done` flag so cleanup is IDEMPOTENT:
+# both cleanup_all() (explicit) and atexit may request the same session.
+_active_sessions: list[dict] = []
 
 
-def initialize_driver() -> webdriver.Chrome:
-    """Create and return a configured ChromeDriver instance.
-    Uses local CHROMEDRIVER_PATH if it exists, otherwise falls back to webdriver-manager.
-    The driver is registered for automatic cleanup on process exit.
+def initialize_driver() -> Page:
     """
-    options = Options()
-    options.add_argument("--ignore-certificate-errors")
-    # NOTE: 'detach' is intentionally NOT used here.
-    # detach=True keeps Chrome alive even after the Python process exits,
-    # which prevents Ctrl+C from closing the browser.
-    options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
+    Launch Playwright + Chrome and return the main Page.
 
-    # Add Chrome user data directory for multi-instance support
+    - If CHROME_USER_DATA_DIR is set, uses a persistent context so each
+      multi-instance run keeps its own login/profile.
+    - Otherwise uses a throwaway profile (fresh, isolated session).
+    - Registered for automatic cleanup on process exit.
+    """
+    pw = sync_playwright().start()
+
+    ignore_https_errors = True  # mirrors old --ignore-certificate-errors
+
     if CHROME_USER_DATA_DIR:
-        options.add_argument(f"--user-data-dir={CHROME_USER_DATA_DIR}")
         logger.info("Using Chrome user data dir: %s", CHROME_USER_DATA_DIR)
-
-    # Add headless mode if specified
-    if HEADLESS:
-        options.add_argument("--headless")
-        logger.info("Running in headless mode")
-
-    # Choose driver: local path first, then webdriver-manager fallback
-    if CHROMEDRIVER_PATH and os.path.exists(CHROMEDRIVER_PATH):
-        logger.info("Using local ChromeDriver: %s", CHROMEDRIVER_PATH)
-        service = Service(executable_path=CHROMEDRIVER_PATH)
+        context = pw.chromium.launch_persistent_context(
+            CHROME_USER_DATA_DIR,
+            channel="chrome",
+            headless=HEADLESS,
+            ignore_https_errors=ignore_https_errors,
+            viewport=VIEWPORT,
+        )
+        browser = None
     else:
-        logger.info("Local ChromeDriver not found, falling back to webdriver-manager...")
+        browser = pw.chromium.launch(
+            channel="chrome",
+            headless=HEADLESS,
+        )
+        context = browser.new_context(
+            ignore_https_errors=ignore_https_errors, viewport=VIEWPORT
+        )
+
+    # Prefer an existing tab (persistent context may restore tabs)
+    pages = context.pages
+    page = pages[0] if pages else context.new_page()
+    if not HEADLESS:
         try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            service = Service(executable_path=ChromeDriverManager().install())
-        except ImportError:
-            logger.error(
-                "webdriver-manager not installed and no local driver found. "
-                "Install with: pip install webdriver-manager OR set CHROMEDRIVER_PATH in .env"
-            )
-            raise
+            page.bring_to_front()
+        except Exception:  # pragma: no cover - best effort
+            pass
 
-    driver = webdriver.Chrome(service=service, options=options)
-    driver.maximize_window()
+    session = {"pw": pw, "browser": browser, "context": context, "done": False}
+    _active_sessions.append(session)
+    atexit.register(_cleanup_session, session)
 
-    _active_drivers.append(driver)
-    atexit.register(_quit_driver, driver)
     instance_info = f" (instance: {INSTANCE_ID})" if INSTANCE_ID else ""
-    logger.info("Driver initialized%s and cleanup registered.", instance_info)
-    return driver
+    logger.info("Browser initialized%s and cleanup registered.", instance_info)
+    return page
 
 
-def _quit_driver(driver: webdriver.Chrome):
-    """Safely quit a single driver instance."""
+def _cleanup_session(session: dict):
+    """Safely close one Playwright session. Idempotent — safe to call twice
+    (explicit cleanup_all() followed by the atexit hook)."""
+    if session.get("done"):
+        return
+    session["done"] = True
+    if session in _active_sessions:
+        _active_sessions.remove(session)
+
+    pw: Playwright = session["pw"]
+    browser: Browser | None = session["browser"]
+    context: BrowserContext = session["context"]
+
     try:
-        driver.quit()
-        logger.info("Driver closed cleanly.")
+        context.close()
+        logger.info("Browser context closed cleanly.")
     except Exception as e:
-        logger.warning("Error closing driver: %s", e)
+        logger.warning("Error closing context: %s", e)
+    if browser is not None:
+        try:
+            browser.close()
+        except Exception as e:
+            logger.warning("Error closing browser: %s", e)
+    try:
+        pw.stop()
+        logger.info("Playwright stopped.")
+    except Exception as e:
+        logger.warning("Error stopping Playwright: %s", e)
 
 
 def cleanup_all():
-    """Force-close all tracked drivers. Call this for immediate cleanup."""
-    for d in _active_drivers:
-        _quit_driver(d)
-    _active_drivers.clear()
+    """Force-close all tracked sessions. Call this for immediate cleanup."""
+    for session in list(_active_sessions):
+        _cleanup_session(session)
+    _active_sessions.clear()
