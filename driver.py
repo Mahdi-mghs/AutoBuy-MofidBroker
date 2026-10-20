@@ -30,6 +30,58 @@ VIEWPORT = {"width": 1600, "height": 1000}
 _active_sessions: list[dict] = []
 
 
+class BrowserGone(RuntimeError):
+    """The Playwright session is unusable — the browser or the driver is gone.
+
+    Raised instead of retrying: no page call can succeed after this.
+    """
+
+
+# Messages Playwright uses once the page/context/browser/connection has died.
+# Lowercased substrings, matched against the whole cause chain.
+_GONE_MARKERS = (
+    "target page, context or browser has been closed",
+    "browser has been closed",
+    "playwright connection closed",
+    "connection closed while reading from the driver",
+    "event loop is closed",
+    "target closed",
+)
+
+
+def is_browser_gone(exc: BaseException | None) -> bool:
+    """True when `exc` (or anything in its cause chain) means the page is dead.
+
+    This is the Ctrl+C case on Windows: the console event also reaches the
+    Playwright driver process, which exits, so every in-flight call fails with
+    TargetClosedError / "Playwright connection closed". Retrying such an error
+    (a clock poll loop, an order burst) just floods the terminal — callers must
+    stop instead. It also covers a crashed Chrome and a stopped Playwright.
+    """
+    seen = 0
+    while exc is not None and seen < 10:
+        if isinstance(exc, BrowserGone):
+            return True
+        text = str(exc).lower()
+        if any(marker in text for marker in _GONE_MARKERS):
+            return True
+        exc = exc.__cause__ or exc.__context__
+        seen += 1
+    return False
+
+
+def require_live_browser(exc: BaseException) -> None:
+    """Re-raise `exc` as BrowserGone when the session is dead; otherwise return.
+
+    Call this first in a broad `except Exception` so a dead browser is never
+    swallowed into a retry/fallback path.
+    """
+    if is_browser_gone(exc):
+        raise BrowserGone(
+            "the Playwright browser/driver is gone (Ctrl+C or a crashed browser)"
+        ) from exc
+
+
 def initialize_driver() -> Page:
     """
     Launch Playwright + Chrome and return the main Page.
@@ -97,17 +149,28 @@ def _cleanup_session(session: dict):
         context.close()
         logger.info("Browser context closed cleanly.")
     except Exception as e:
-        logger.warning("Error closing context: %s", e)
+        # After Ctrl+C the driver process is already gone: closing what is
+        # left cannot work and is not an error worth a stack trace.
+        if is_browser_gone(e):
+            logger.info("Browser was already closed (driver exited after Ctrl+C).")
+        else:
+            logger.warning("Error closing context: %s", e)
     if browser is not None:
         try:
             browser.close()
         except Exception as e:
-            logger.warning("Error closing browser: %s", e)
+            if is_browser_gone(e):
+                logger.debug("Browser already closed: %s", e)
+            else:
+                logger.warning("Error closing browser: %s", e)
     try:
         pw.stop()
         logger.info("Playwright stopped.")
     except Exception as e:
-        logger.warning("Error stopping Playwright: %s", e)
+        if is_browser_gone(e):
+            logger.debug("Playwright already stopped: %s", e)
+        else:
+            logger.warning("Error stopping Playwright: %s", e)
 
 
 def cleanup_all():

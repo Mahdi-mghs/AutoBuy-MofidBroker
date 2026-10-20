@@ -21,6 +21,7 @@ from config import (
     CLOCK_POLL_INTERVAL,
     CLOCK_DEADLINE_SECONDS,
 )
+from driver import require_live_browser
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +39,8 @@ def login(page: Page) -> bool:
 
     for attempt in range(1, LOGIN_MAX_ATTEMPTS + 1):
         logger.info("Login attempt %d/%d", attempt, LOGIN_MAX_ATTEMPTS)
-        page.goto(BROKER_URL, wait_until="domcontentloaded")
-
         try:
+            page.goto(BROKER_URL, wait_until="domcontentloaded")
             page.locator(locators.LOGIN_USER_INPUT).fill(USERNAME, timeout=LOGIN_TIMEOUT * 1000)
             page.locator(locators.LOGIN_PASS_INPUT).fill(PASSWORD, timeout=LOGIN_TIMEOUT * 1000)
             page.locator(locators.LOGIN_SUBMIT_BUTTON).first.click(timeout=LOGIN_TIMEOUT * 1000)
@@ -53,6 +53,10 @@ def login(page: Page) -> bool:
         except PlaywrightTimeoutError:
             logger.warning("Login attempt %d failed, retrying...", attempt)
             time.sleep(1.0)
+        except Exception as e:
+            # Ctrl+C kills the driver: another attempt cannot work.
+            require_live_browser(e)
+            raise
 
     logger.error("Login failed after %d attempts.", LOGIN_MAX_ATTEMPTS)
     return False
@@ -82,7 +86,7 @@ def get_broker_time(page: Page) -> dt_time:
     raise ValueError(f"Unexpected broker time format: {text!r}")
 
 
-def wait_until_broker_time(page: Page, target: dt_time, now_fn=None) -> dt_time:
+def wait_until_broker_time(page: Page, target: dt_time, now_fn=None, should_stop=None) -> dt_time | None:
     """
     Wait until the broker clock shows >= target time (and <= 15:30:00).
 
@@ -90,9 +94,20 @@ def wait_until_broker_time(page: Page, target: dt_time, now_fn=None) -> dt_time:
     clock. Raises TimeoutError if the target isn't reached within
     CLOCK_DEADLINE_SECONDS (default 1h) — guards against a closed market
     or a vanished clock element.
+
+    `should_stop` is polled every iteration; when it returns True the wait
+    gives up and returns None (main treats that as "user pressed Ctrl+C" and
+    exits before the buy). Without it a Ctrl+C during a long wait looked like
+    a hang: the flag was set but the loop kept polling.
+
+    Raises BrowserGone if the page/driver died (see driver.is_browser_gone) —
+    retrying a closed target only floods the log with Playwright errors.
     """
     if now_fn is None:
         now_fn = lambda: get_broker_time(page)
+
+    def stop_requested() -> bool:
+        return bool(should_stop and should_stop())
 
     deadline = datetime.now() + timedelta(seconds=CLOCK_DEADLINE_SECONDS)
     logger.info(
@@ -105,9 +120,14 @@ def wait_until_broker_time(page: Page, target: dt_time, now_fn=None) -> dt_time:
     try:
         now_fn()
     except Exception as e:
+        require_live_browser(e)
         raise TimeoutError(f"Cannot find broker clock element: {e}") from e
 
     while True:
+        if stop_requested():
+            logger.info("Stop requested — leaving the clock wait before %s.", target.strftime("%H:%M:%S"))
+            return None
+
         if datetime.now() > deadline:
             raise TimeoutError(
                 f"Broker time {target} not reached within "
@@ -118,6 +138,10 @@ def wait_until_broker_time(page: Page, target: dt_time, now_fn=None) -> dt_time:
         try:
             now = now_fn()
         except Exception as e:
+            require_live_browser(e)
+            if stop_requested():
+                logger.info("Stop requested — leaving the clock wait.")
+                return None
             # Transient read failure (stale element, repaint) — retry
             logger.warning("Clock read failed (%s), retrying...", e)
             time.sleep(CLOCK_POLL_INTERVAL)
@@ -195,7 +219,8 @@ def capture_broker_notification(page: Page, timeout=NOTIFY_TIMEOUT) -> str:
                     if text:
                         logger.debug("Notification via selector %s: %r", sel, text)
                         return text
-            except Exception:
+            except Exception as e:
+                require_live_browser(e)  # a dead page will never show a toast
                 continue
         time.sleep(0.1)
 

@@ -10,12 +10,15 @@ What is covered here:
 """
 
 import builtins
+import logging
 from datetime import time as dt_time
 
 import pytest
 
 import broker
 import main as main_mod
+from api_flow import ApiFlowError
+from easy_api import ApiAuthError
 from order import _read_number
 
 
@@ -128,10 +131,14 @@ def stub_main(monkeypatch, calls):
         ),
     )
     monkeypatch.setattr(m, "find_buy_button", lambda page, timeout=5: object())
-    monkeypatch.setattr(m, "is_time_already_passed", lambda page, target, logger: False)
+    monkeypatch.setattr(m, "is_time_already_passed", lambda page, target, logger, **kw: False)
     monkeypatch.setattr(
-        m, "wait_until_broker_time", lambda page, target: calls.append(("wait", target))
+        m, "wait_until_broker_time", lambda page, target, **kw: calls.append(("wait", target))
     )
+    # Cached-token fast path (ADR-005) stays out of the way unless a test opts in.
+    monkeypatch.setattr(m, "TOKEN_CACHE", False)
+    monkeypatch.setattr(m, "_try_resume_api", lambda page, symbol, logger: None)
+    monkeypatch.setattr(m, "_ui_logged_in", lambda page, timeout_ms=3000: True)
     monkeypatch.setattr(
         m, "execute_buy", lambda page: (calls.append("buy"), True)[1]
     )
@@ -168,7 +175,7 @@ def test_manual_mode_pauses_instead_of_preparing(stub_main, calls, monkeypatch):
 
 
 def test_expired_target_time_exits_before_buying(stub_main, calls, monkeypatch):
-    monkeypatch.setattr(stub_main, "is_time_already_passed", lambda page, t, log: True)
+    monkeypatch.setattr(stub_main, "is_time_already_passed", lambda page, t, log, **kw: True)
 
     with pytest.raises(SystemExit) as exc:
         stub_main.main(["--time", "08:44:58", "--symbol", "فولاد"])
@@ -192,6 +199,246 @@ def test_symbol_cli_overrides_env(stub_main, calls, monkeypatch):
     monkeypatch.setattr(stub_main, "SYMBOL", "خودرو")
     stub_main.main(["--time", "08:44:58", "--symbol", "فولاد"])
     assert ("prepare", "فولاد") in calls
+
+
+# ────────────────────────────────────────────────────────
+# main() shutdown: Ctrl+C before the buy, dead browser
+# ────────────────────────────────────────────────────────
+def test_wait_receives_a_should_stop_hook(stub_main, calls, monkeypatch):
+    """The clock wait must be able to see Ctrl+C (it used to ignore it)."""
+    seen = {}
+
+    def wait(page, target, **kw):
+        seen.update(kw)
+        return dt_time(8, 44, 58)
+
+    monkeypatch.setattr(stub_main, "wait_until_broker_time", wait)
+    stub_main.main(["--time", "08:44:58", "--symbol", "فولاد"])
+
+    assert callable(seen.get("should_stop"))
+    assert seen["should_stop"]() is False   # nothing pressed yet
+
+
+def test_ctrl_c_during_wait_exits_before_buy(stub_main, calls, monkeypatch):
+    def wait(page, target, **kw):
+        calls.append(("wait", target))
+        stub_main._shutdown_requested = True   # the signal handler ran
+        kw["should_stop"]()                    # and the wait saw it
+        return None
+
+    monkeypatch.setattr(stub_main, "wait_until_broker_time", wait)
+
+    with pytest.raises(SystemExit) as exc:
+        stub_main.main(["--time", "08:44:58", "--symbol", "فولاد"])
+
+    assert exc.value.code == 0        # a user abort is not a failure
+    assert "buy" not in calls
+    assert calls[-1] == "cleanup"
+
+
+def test_dead_browser_after_ctrl_c_exits_zero(stub_main, calls, monkeypatch):
+    from driver import BrowserGone
+
+    def wait(page, target, **kw):
+        stub_main._shutdown_requested = True
+        raise BrowserGone("the Playwright browser/driver is gone")
+
+    monkeypatch.setattr(stub_main, "wait_until_broker_time", wait)
+
+    with pytest.raises(SystemExit) as exc:
+        stub_main.main(["--time", "08:44:58", "--symbol", "فولاد"])
+
+    assert exc.value.code == 0
+    assert "buy" not in calls
+    assert calls[-1] == "cleanup"
+
+
+def test_dead_browser_without_ctrl_c_exits_one(stub_main, calls, monkeypatch, caplog):
+    from driver import BrowserGone
+
+    def wait(page, target, **kw):
+        raise BrowserGone("the Playwright browser/driver is gone")
+
+    monkeypatch.setattr(stub_main, "wait_until_broker_time", wait)
+
+    with pytest.raises(SystemExit) as exc:
+        stub_main.main(["--time", "08:44:58", "--symbol", "فولاد"])
+
+    assert exc.value.code == 1
+    assert "buy" not in calls
+    assert calls[-1] == "cleanup"
+
+
+# ────────────────────────────────────────────────────────
+# main() with a cached API token (ADR-005)
+# ────────────────────────────────────────────────────────
+def _resumed_prepared():
+    return {
+        "symbol": "فولاد",
+        "isin": "IRO1FOLD0001",
+        "quantity": 1,
+        "price": 4540,
+        "price_mode": "ceiling",
+        "commission": 0.003712,
+        "client": object(),
+        "clock": lambda: dt_time(8, 0, 0),
+        "resumed": True,
+    }
+
+
+def test_cached_token_resume_skips_login_and_ui(stub_main, calls, monkeypatch):
+    monkeypatch.setattr(stub_main, "_try_resume_api", lambda page, symbol, logger: _resumed_prepared())
+    monkeypatch.setattr(stub_main, "_ui_logged_in", lambda page, timeout_ms=3000: False)
+    monkeypatch.setattr(stub_main.api_flow, "execute_buy_api", lambda client, prep, **kw: True)
+
+    stub_main.main(["--time", "08:44:58", "--symbol", "فولاد"])
+
+    assert "login" not in calls                      # the whole point: no login
+    assert not any(isinstance(c, tuple) and c[0] == "prepare" for c in calls)
+    assert ("wait", dt_time(8, 44, 58)) in calls
+
+
+def test_api_only_run_logs_in_before_ui_fallback(stub_main, calls, monkeypatch):
+    def boom(client, prep):
+        raise RuntimeError("API died mid-flight")
+
+    monkeypatch.setattr(stub_main, "_try_resume_api", lambda page, symbol, logger: _resumed_prepared())
+    monkeypatch.setattr(stub_main, "_ui_logged_in", lambda page, timeout_ms=3000: False)
+    monkeypatch.setattr(stub_main.api_flow, "execute_buy_api", boom)
+    monkeypatch.setattr(stub_main.api_flow, "order_already_present", lambda client, prep: False)
+
+    stub_main.main(["--time", "08:44:58", "--symbol", "فولاد"])
+
+    assert "login" in calls                          # fallback needs a real session
+    assert "buy" in calls
+
+
+def test_no_token_cache_flag_forces_login(stub_main, calls, monkeypatch):
+    resumed = []
+    monkeypatch.setattr(
+        stub_main, "_try_resume_api", lambda page, symbol, logger: resumed.append(1) or None
+    )
+    monkeypatch.setattr(stub_main, "_try_prepare_api", lambda *a, **kw: None)
+
+    stub_main.main(["--time", "08:44:58", "--symbol", "فولاد", "--no-token-cache"])
+
+    assert resumed == []                              # cache never consulted
+    assert "login" in calls
+
+
+# ────────────────────────────────────────────────────────
+# main._try_resume_api — cache decision logic
+# ────────────────────────────────────────────────────────
+class _FakePage:
+    """Just enough Page for the resume path: goto() + a browser context."""
+
+    class _Ctx:
+        request = object()
+
+    context = _Ctx()
+
+    def __init__(self):
+        self.goto_calls = []
+
+    def goto(self, url, wait_until=None):
+        self.goto_calls.append(url)
+
+
+class _AliveClient:
+    def __init__(self, *a, **kw):
+        pass
+
+    def server_timestamp(self):
+        return 1_000_000
+
+    def list_orders(self):
+        return []
+
+
+class _DeadClient(_AliveClient):
+    def server_timestamp(self):
+        raise ApiAuthError("GET /... → 401 Unauthorized (token expired?)")
+
+
+def _stub_cache(monkeypatch, token="t" * 100):
+    """Enable the cache and record clear_token() calls. Returns the record list."""
+    cleared = []
+    monkeypatch.setattr(main_mod, "TOKEN_CACHE", True)
+    monkeypatch.setattr(main_mod.token_store, "load_token", lambda path, minv, **kw: token)
+    monkeypatch.setattr(main_mod.token_store, "describe", lambda path: "cached token (test)")
+    monkeypatch.setattr(
+        main_mod.token_store, "clear_token", lambda path: cleared.append(path) or True
+    )
+    monkeypatch.setattr(main_mod, "PlaywrightTransport", lambda ctx: None)
+    return cleared
+
+
+PREPARED = {
+    "symbol": "فولاد",
+    "isin": "IRO1FOLD0001",
+    "quantity": 1,
+    "price": 4540,
+    "price_mode": "ceiling",
+    "commission": 0.003712,
+}
+
+
+def test_resume_returns_prepared_order_with_api_clock(monkeypatch):
+    _stub_cache(monkeypatch)
+    monkeypatch.setattr(main_mod, "EasyApiClient", _AliveClient)
+    monkeypatch.setattr(main_mod.api_flow, "prepare_via_api", lambda *a, **kw: dict(PREPARED))
+
+    prepared = main_mod._try_resume_api(_FakePage(), "فولاد", logging.getLogger("t"))
+
+    assert prepared["resumed"] is True
+    assert prepared["price"] == 4540
+    assert callable(prepared["clock"])  # plugs straight into wait_until_broker_time
+
+
+def test_resume_drops_cached_token_on_401(monkeypatch):
+    cleared = _stub_cache(monkeypatch)
+    monkeypatch.setattr(main_mod, "EasyApiClient", _DeadClient)
+
+    assert main_mod._try_resume_api(_FakePage(), "فولاد", logging.getLogger("t")) is None
+    assert cleared, "a rejected (401) token must be deleted, not retried"
+
+
+def test_resume_drops_token_when_prep_wraps_the_401(monkeypatch):
+    """prepare_via_api re-raises as ApiFlowError — the cause chain still counts."""
+    cleared = _stub_cache(monkeypatch)
+    monkeypatch.setattr(main_mod, "EasyApiClient", _AliveClient)
+
+    def wrapped(*a, **kw):
+        outer = ApiFlowError("API prep failed: POST /symbols/api/symbols/all → 401")
+        outer.__cause__ = ApiAuthError("401 Unauthorized")
+        raise outer
+
+    monkeypatch.setattr(main_mod.api_flow, "prepare_via_api", wrapped)
+
+    assert main_mod._try_resume_api(_FakePage(), "فولاد", logging.getLogger("t")) is None
+    assert cleared
+
+
+def test_resume_keeps_token_on_transient_error(monkeypatch):
+    """A WAF/network hiccup must not throw away a working session token."""
+    cleared = _stub_cache(monkeypatch)
+
+    class Flaky(_AliveClient):
+        def server_timestamp(self):
+            raise ApiFlowError("transport error")
+
+    monkeypatch.setattr(main_mod, "EasyApiClient", Flaky)
+
+    assert main_mod._try_resume_api(_FakePage(), "فولاد", logging.getLogger("t")) is None
+    assert cleared == []
+
+
+def test_is_auth_failure_walks_the_cause_chain():
+    outer = ApiFlowError("prep failed")
+    outer.__cause__ = ApiAuthError("401")
+
+    assert main_mod._is_auth_failure(outer) is True
+    assert main_mod._is_auth_failure(ValueError("nothing to do with auth")) is False
 
 
 # ────────────────────────────────────────────────────────
