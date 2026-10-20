@@ -64,6 +64,16 @@ cp .env.example .env
 | `CHROME_USER_DATA_DIR` | `""` | Separate Chrome profile per instance |
 | `HEADLESS` | `false` | Run Chrome without UI |
 | `INSTANCE_ID` | `""` | Identifier for multi-instance logs |
+| `API_MODE` | `true` | Direct HTTP order mode (ADR-004) — prepares & submits over the EasyTrader API through the browser context; falls back to the UI path on any API failure |
+| `API_BASE_URL` | `https://api-mts.orbis.easytrader.ir` | API base URL (captured endpoint) |
+| `API_BUY_MAX_ATTEMPTS` | `20` | Order POSTs **at/after the open** (each is a real order). 20 × 350 ms ≈ 7 s of coverage — enough to reach the front of the buy queue (ADR-006) |
+| `API_PREOPEN_MAX_ATTEMPTS` | `30` | Submits refused because the session has not opened yet (`11000`/`8702`). Retried without spending the budget above; bounded so a holiday can't loop |
+| `API_BUY_RETRY_INTERVAL` | `0.35` | Seconds between those POSTs (send-to-send). The broker refuses orders closer than 300 ms (ADR-006) |
+| `API_MIN_SUBMIT_INTERVAL` | `0.32` | Hard floor for that gap — measured as the fastest spacing the broker accepts |
+| `API_ORDER_WINDOW_GRACE` | `8` | Session 08:45–12:35, order registration 08:45–12:30; the burst warns when the open is further away than this |
+| `TOKEN_CACHE` | `true` | Reuse the previous run's JWT and skip the login when it still works (ADR-005) |
+| `TOKEN_CACHE_PATH` | `.mofid_token.json` | Cache file (project-relative, git-ignored, `0600` on POSIX) |
+| `TOKEN_CACHE_MIN_VALIDITY` | `120` | Only reuse a token valid for at least this many seconds |
 
 See [`.env.example`](.env.example) for the full list (timeouts, retry counts, log file).
 
@@ -84,6 +94,58 @@ python main.py --time 08:44:58 --symbol فولاد
 ```bash
 python main.py --time 09:00:00 --no-verify
 ```
+
+### Disable the API for one run
+
+```bash
+python main.py --no-api
+```
+
+With `API_MODE=true` (default) the bot logs in with Playwright and then does
+everything else over EasyTrader's raw HTTP API (symbol lookup, ceiling price,
+order submission, order verification) — much faster and race-free. Any API
+failure automatically falls back to the proven UI path. See
+[ADR-004](docs/adr/004-hybrid-http-api-mode.md) for the captured endpoints
+and the safety rationale.
+
+### Order cadence and the order window
+
+The session runs **08:45:00–12:35:00** and the broker accepts new orders
+**08:45–12:30**, refusing two submissions closer than **300 ms** apart
+(`13021 OrderIntervalError`) — measured live, see
+[ADR-006](docs/adr/006-order-cadence-and-window.md).
+
+There are two kinds of "no" and they must not be confused:
+
+| Broker answer | Meaning | What the burst does |
+|---|---|---|
+| `13021` | two submits < 300 ms apart; nothing reached the book | retry after the gate, free |
+| `8702` / `11000` | the session has not opened yet (or is over) | before 08:45: keep submitting (free); after 12:30: stop |
+| anything else (`8006`, bands, balance) | a real refusal of the order | stop — the answer will not change |
+
+That is why the target is **08:44:58**: the first submits are refused with
+`11000 "وضعیت گروه اجازه فعالیت نمی‌دهد"`, they cost nothing, and the burst is
+still in flight at 08:45:00 when the book opens. After the open it has
+`API_BUY_MAX_ATTEMPTS` (20) fresh submits at 350 ms — about 7 s — to land at or
+near the front of the buy queue. An earlier version treated `11000` as a
+rejection and gave up 3 s before the open on a real-money run.
+
+### Reuse the cached API token (skip the login)
+
+```bash
+python main.py --time 08:44:58 --symbol فولاد   # run 1 — logs in, caches the JWT (~12 h)
+python main.py --time 08:44:58 --symbol فولاد   # run 2 — no login: cached token reused
+python main.py --no-token-cache                 # force a fresh Playwright login
+```
+
+The token harvested after a successful login is saved to `TOKEN_CACHE_PATH`.
+The next run validates it with read-only calls (server clock, order list,
+symbol + quote) and, if it still works, skips the login entirely and uses the
+API clock instead of the on-page clock. A rejected token is deleted and the run
+falls back to the normal login, so nothing changes for you when it expires.
+The cache is bound to the configured `MOFID_USER` — changing accounts never
+resumes the previous account's session. See
+[ADR-005](docs/adr/005-cached-api-token.md) for the safety analysis.
 
 ### Legacy manual preparation
 
@@ -111,8 +173,8 @@ Each instance has its own Chrome profile (no cookie/login conflicts) and tagged 
 
 ## Workflow
 
-1. **Login** — automated with Playwright
-2. **Preparation** — automated: sidebar search → exact symbol → buy ticket → quantity → price per `PRICE_MODE` → read-back verification
+1. **Auth** — a cached API token when one is still valid (ADR-005), otherwise an automated Playwright login
+2. **Preparation** — automated: symbol lookup + live quote over HTTP (API mode), else sidebar search → exact symbol → buy ticket → quantity → price per `PRICE_MODE` → read-back verification
 3. **Time wait** — waits for the broker clock ≥ target
 4. **Auto-buy** — clicks buy up to 25 times, 100 ms apart, until the broker accepts
 5. **Verification** — checks the orders list for the new order
@@ -147,6 +209,10 @@ without submitting. See [docs/adr/003](docs/adr/003-real-browser-testing-without
 - [ADR-001 — Adopt Playwright instead of Selenium](docs/adr/001-adopt-playwright.md)
 - [ADR-002 — Automate order preparation](docs/adr/002-automate-order-preparation.md)
 - [ADR-003 — Real-browser testing without submitting](docs/adr/003-real-browser-testing-without-submitting.md)
+- [ADR-004 — Hybrid HTTP API mode](docs/adr/004-hybrid-http-api-mode.md)
+- [ADR-005 — Cached API token (skip the login)](docs/adr/005-cached-api-token.md)
+- [ADR-006 — Order cadence and the order window (measured)](docs/adr/006-order-cadence-and-window.md)
+- [ADR-007 — Graceful shutdown on Ctrl+C](docs/adr/007-graceful-shutdown-on-ctrl-c.md)
 - [Glossary](docs/glossary.md) — trading terms (Persian/English) + bot internals
 
 ---
@@ -172,7 +238,11 @@ All logs write to console (stdout) and `autobuy.log` (configurable via `LOG_FILE
 | "Broker clock not found" | Wait for full page load; check the network connection |
 | "Target time already passed" | Start earlier, or pass a later `--time` |
 | "Order not accepted after all retries" | Manual check; broker may have rejected due to price/quantity |
-| Silent Chrome after Ctrl+C | Make sure `--user-data-dir` isn't locked by another process |
+| `11000` / `8702` in the log | The session is not open (or already closed). The burst retries these for free; if it exhausts `API_PREOPEN_MAX_ATTEMPTS`, the target is too far from 08:45 or the market is closed today |
+| `8006` in the log | Order value is below the **500 000 Toman** minimum — raise `QUANTITY` |
+| Ctrl+C before the buy | Stops immediately: `Stop requested — leaving the clock wait`, then `Exiting before buy` and exit 0. The console event also kills the Playwright driver, so cleanup may log `Browser was already closed` — that is expected, not an error (ADR-007) |
+| Ctrl+C during/after the buy | The run stops too, with a `check the orders tab manually` warning — an order may already have reached the broker |
+| `Browser/Playwright session lost` | The browser or driver died (Chrome closed, crash). Exit 1; nothing further is submitted |
 
 ---
 
@@ -189,6 +259,10 @@ longer runs — use `main.py --manual` for the equivalent manual flow.
 This tool automates sensitive financial operations.
 Test thoroughly in a safe environment before trading real money.
 Use at your own risk.
+
+API mode talks to **undocumented, unofficial broker endpoints** captured from the
+web app (ADR-004). They can change or be blocked without notice; the bot falls
+back to the UI path when they do, but treat API order results with extra care.
 
 ---
 

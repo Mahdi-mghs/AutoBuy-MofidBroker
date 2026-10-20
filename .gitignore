@@ -1,8 +1,10 @@
 # Credentials — never commit
 .env
 
-# Logs
-autobuy.log
+# Logs (autobuy.log and any per-instance LOG_FILE)
+*.log
+# Cached API session token (JSON, chmod 0600) — never commit
+.mofid_token*
 
 # Test artifacts (smoke-test screenshots, DOM dumps, discovery profile)
 artifacts/
@@ -29,3 +31,7 @@ build/
 dist/
 *.egg-info/
 MANIFEST.in
+
+# Environment variants (.env.local, .env.staging, ...) but keep the template
+.env.*
+!.env.example
