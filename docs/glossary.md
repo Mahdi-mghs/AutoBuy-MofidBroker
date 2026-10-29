@@ -24,6 +24,9 @@ EasyTrader UI) is kept next to its English explanation.
 | **Draft / پیش‌نویس** | Secondary button that saves an order without sending it (`oms-order-form-draft-button-buy`). Never clicked by the bot. |
 | **Order interval rule / فاصله سفارش** | The broker refuses two order submissions closer than 300 ms apart (`13021 OrderIntervalError`) — measured live; the bot's submit gate keeps 320 ms+ (ADR-006). |
 | **Order window / ساعت مجاز ثبت سفارش** | 08:45–12:30, the hours the broker accepts orders (`8702` otherwise). Not the same as the trading session hours (08:45–12:35). |
+| **Buying power / قدرت خرید** | How much a buy may spend today, from `GET /easy/api/money` → `buyPowerT0` (RIAL). Powers the pre-burst balance check (ADR-008). |
+| **Tradable balance / مانده قابل معامله** | The plain cash balance (`t0`). Used only when `buyPowerT0` is absent — it does not subtract blocks. |
+| **Order review** | The block `log_order_review` prints right before the burst: symbol, quantity, price, commission, order value, buying power, balance left (or the shortfall). No request at that point — the numbers come from preparation. |
 | **Pre-open refusal** | A submit refused because the session has not opened yet — `8702` ("ساعت مجاز ثبت سفارش…") or, just before 08:45, `11000` ("وضعیت گروه اجازه فعالیت نمی‌دهد"). Nothing reaches the book, so the burst retries: this is how the bot is in flight at 08:45:00. After 12:30 the same answers mean "closed for the day" and stop the burst. |
 | **Submit gate** | `EasyApiClient`'s send-to-send throttle: it sleeps before a POST so consecutive orders are never closer than the floor. |
 | **Toast / notification** | Brief broker message confirming or rejecting an order, hosted in `<app-notify>`; keywords are classified by `is_order_accepted`. |

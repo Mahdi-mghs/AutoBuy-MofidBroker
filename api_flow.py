@@ -8,6 +8,7 @@ Flow (API_MODE=true):
 2. easy_api.extract_auth_token — harvest JWT from page traffic
 3. easy_api.EasyApiClient over PlaywrightTransport (WAF-safe)
 4. find_symbol → market_data (ceiling/reference price from HTTP, no clicks)
+   + /easy/api/money for the balance check (قدرت خرید / مانده قابل معامله)
 5. Buyer-clock wait — broker.wait_until_broker_time (UI clock stays the
    reference; it reports the same time as the API serverTimestamp)
 6. submit-buy burst over HTTP — spaced by the client's 320 ms submit gate
@@ -36,11 +37,13 @@ from config import (
 from driver import require_live_browser
 from easy_api import (
     EasyApiClient,
+    EasyApiError,
     ORDER_WINDOW_CLOSE,
     ORDER_WINDOW_OPEN,
     OMS_CODES_NOT_OPEN,
     OMS_CODE_ORDER_INTERVAL,
     TEHRAN_TZ,
+    buying_power,
     parse_oms_error,
 )
 
@@ -145,7 +148,6 @@ def prepare_via_api(
     if quantity is None or int(quantity) <= 0:
         raise ApiFlowError("quantity must be > 0.")
 
-    from easy_api import EasyApiError
     try:
         md = client.market_data(client.find_symbol(symbol)["symbolIsin"])
     except EasyApiError as e:
@@ -159,19 +161,97 @@ def prepare_via_api(
     if max_q and int(quantity) > int(max_q):
         raise ApiFlowError(f"quantity {quantity} above maxValidBuyVolume {max_q}.")
 
+    commission = client.buy_commission(md)
     summary = {
         "symbol": symbol,
         "isin": md.get("symbolIsin"),
         "quantity": int(quantity),
         "price": final_price,
         "price_mode": (price_mode or "ceiling").lower(),
-        "commission": client.buy_commission(md),
+        "commission": commission,
         "high_allowed": md.get("highAllowedPrice"),
         "low_allowed": md.get("lowAllowedPrice"),
         "closing": md.get("closingPrice"),
+        # Same rounding as build_buy_payload's totalValue (RIAL).
+        "order_value": round(final_price * int(quantity) * (1 + commission)),
     }
+
+    # Balance check (قدرت خرید / مانده قابل معامله) — read here, BEFORE the clock
+    # wait, so the burst pays no extra round trip on the opening millisecond.
+    try:
+        summary["buying_power"] = buying_power(client.money())
+    except EasyApiError as e:
+        logger.warning("Account balance unavailable (%s) — balance check skipped.", e)
+    gap = _shortfall(summary)
+    if gap is not None:
+        logger.warning(
+            "⚠️ Order value %s exceeds the buying power %s by %s — the broker will "
+            "reject this for insufficient balance. Top up or lower QUANTITY=%d.",
+            _rial(summary["order_value"]), _rial(summary["buying_power"]), _rial(gap),
+            int(quantity),
+        )
+
     logger.info("API order prepared: %s", summary)
     return summary
+
+
+def _rial(amount: int) -> str:
+    """The API speaks RIAL, users think TOMAN — show both."""
+    return f"{int(amount):,} Rial ({int(amount) // 10:,} Toman)"
+
+
+def _shortfall(prepared: dict) -> int | None:
+    """Rial by which the order value exceeds the buying power.
+
+    None when the balance is unknown or covers the order.
+    """
+    power = prepared.get("buying_power")
+    value = prepared.get("order_value")
+    if power is None or value is None:
+        return None
+    gap = int(value) - int(power)
+    return gap if gap > 0 else None
+
+
+def log_order_review(prepared: dict) -> bool:
+    """
+    Short review of the pending order, printed right before the submit burst.
+
+    No I/O: price, value and balance were all read during preparation. Returns
+    False when the order costs more than the buying power — a warning only, the
+    submit still happens because the broker is the final judge (a credit line
+    can cover the gap, and a real refusal stops the burst anyway).
+    """
+    qty = int(prepared["quantity"])
+    price = int(prepared["price"])
+    commission = float(prepared.get("commission") or 0.0)
+    value = int(prepared.get("order_value") or round(price * qty * (1 + commission)))
+    prepared["order_value"] = value
+
+    logger.info("Order review:")
+    logger.info("  symbol        %s (%s)", prepared.get("symbol"), prepared.get("isin"))
+    logger.info("  quantity      %s share(s)", f"{qty:,}")
+    logger.info("  price         %s  [%s]", _rial(price), prepared.get("price_mode") or "?")
+    logger.info(
+        "  commission    %.4f%% → %s", commission * 100, _rial(round(price * qty * commission))
+    )
+    logger.info("  order value   %s", _rial(value))
+
+    power = prepared.get("buying_power")
+    if power is None:
+        logger.warning("  buying power  unknown — balance check unavailable.")
+        return True
+    logger.info("  buying power  %s", _rial(power))
+    gap = _shortfall(prepared)
+    if gap is not None:
+        logger.warning(
+            "  ⚠️ SHORT by %s — the broker will reject this order for insufficient "
+            "balance. Top up or lower QUANTITY=%d.",
+            _rial(gap), qty,
+        )
+        return False
+    logger.info("  balance after %s", _rial(int(power) - value))
+    return True
 
 
 # ── Broker response classification (measured live 2026-10-18) ──
@@ -311,6 +391,10 @@ def execute_buy_api(
 
     max_attempts = max(1, int(API_BUY_MAX_ATTEMPTS))
     max_refusals = max(1, int(API_PREOPEN_MAX_ATTEMPTS))
+
+    # What is about to be bought, and does the balance cover it? Logged from the
+    # numbers preparation already read — no extra request before the open.
+    log_order_review(prepared)
 
     # The broker rejects submits < 300 ms apart; never go below the floor.
     interval = max(float(API_BUY_RETRY_INTERVAL), float(API_MIN_SUBMIT_INTERVAL))

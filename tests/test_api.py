@@ -38,6 +38,7 @@ from api_flow import (
     ApiFlowError,
     classify_submit_response,
     execute_buy_api,
+    log_order_review,
     prepare_via_api,
     resolve_price,
 )
@@ -182,6 +183,79 @@ def test_prepare_via_api_unknown_symbol():
     client = make_client(routes)
     with pytest.raises(ApiFlowError):
         prepare_via_api(client, "نجیب", quantity=1)
+
+
+# ── Account money / buying power (قدرت خرید) ───────────
+CAPTURED_MONEY = {
+    "t0": 1268425599,
+    "t1": 1261209968,
+    "t2": 1261209968,
+    "buyPowerT0": 1261209968,
+    "buyPowerT1": 1261209968,
+    "buyPowerT2": 1261209968,
+    "blockT2": 0,
+    "withdrawBlockT2": 0,
+    "marginBlock": 0,
+    "credit": 0,
+    "avandCredit": 0,
+    "walletWithdrawBalanceT0": 1261209968,
+    "warrantValueCredit": 0,
+    "hamiBalance": 1268340605,
+    "block": 0,
+}
+
+
+def test_money_returns_the_captured_balance_body():
+    routes = default_routes()
+    routes[("GET", "/easy/api/money")] = (200, json.dumps(CAPTURED_MONEY))
+    client = make_client(routes)
+    assert client.money() == CAPTURED_MONEY
+    assert easy_api.buying_power(client.money()) == 1261209968
+
+
+def test_buying_power_falls_back_to_cash_then_settlement_days():
+    assert easy_api.buying_power({"buyPowerT1": 5, "t1": 9}) == 5
+    assert easy_api.buying_power({"t1": 9, "t2": 7}) == 9  # no buyPowerT0 at all
+    assert easy_api.buying_power({}) is None
+    assert easy_api.buying_power(None) is None
+
+
+def test_prepare_via_api_reads_the_buying_power_and_order_value():
+    routes = default_routes()
+    routes[("GET", "/easy/api/money")] = (200, json.dumps(CAPTURED_MONEY))
+    summary = prepare_via_api(make_client(routes), NAME, quantity=10)
+    assert summary["buying_power"] == 1261209968
+    assert summary["order_value"] == round(4540 * 10 * 1.003712)
+
+
+def test_prepare_via_api_warns_when_the_order_exceeds_the_balance(caplog):
+    routes = default_routes()
+    routes[("GET", "/easy/api/money")] = (200, json.dumps({"buyPowerT0": 1_000}))
+    with caplog.at_level("WARNING", logger="api_flow"):
+        summary = prepare_via_api(make_client(routes), NAME, quantity=10)
+    assert summary["order_value"] > summary["buying_power"]
+    assert any("exceeds the buying power" in r.message for r in caplog.records)
+
+
+def test_prepare_via_api_survives_an_unavailable_balance():
+    # No /easy/api/money route → MockTransport answers 500 → balance unknown.
+    summary = prepare_via_api(make_client(default_routes()), NAME, quantity=1)
+    assert "buying_power" not in summary
+    assert summary["order_value"] == round(4540 * 1.003712)
+
+
+def test_order_review_flags_a_shortfall(caplog, tmp_path):
+    known = dict(_prepared(), order_value=4_557, buying_power=4_000)
+    with caplog.at_level("WARNING", logger="api_flow"):
+        assert log_order_review(known) is False
+    assert any("SHORT by" in r.message for r in caplog.records)
+
+    covered = dict(_prepared(), order_value=4_557, buying_power=1_000_000)
+    assert log_order_review(covered) is True
+
+    unknown = _prepared()  # no balance read at all (e.g. UI-prepared order)
+    assert log_order_review(unknown) is True
+    assert unknown["order_value"] == round(4540 * 1.003712)
 
 
 # ── execute_buy_api ────────────────────────────────────

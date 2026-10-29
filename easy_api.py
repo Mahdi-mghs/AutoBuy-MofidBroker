@@ -37,6 +37,9 @@ Captured request/response facts (2026-10-16, symbol فولاد):
       totalValue = round(price*quantity*(1+commission))   (4540*1.003712→4557)
   GET /core/api/order                    → {"orders":[...],"algoSuffixCharacters":...}
   GET /easy/api/account/server-time/{ms} → {"diff":852,"serverTimestamp":1792165672816}
+  GET /easy/api/money
+      → {"t0":1268425599,"buyPowerT0":1261209968,"buyPowerT1":1261209968,
+         "block":0,"credit":0,...}         all amounts in RIAL (like prices)
 """
 
 from __future__ import annotations
@@ -84,6 +87,22 @@ VALIDITY_TYPE_DAY = 0   # captured literal (day order)
 # Tehran time for createDateTime — same wall clock as the browser
 # (Iran has no DST since 2022; fixed +3:30).
 TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+
+# «قدرت خرید» per settlement day in the /easy/api/money body, best first:
+# buyPowerT0 is what a T+0 buy can spend. t0 is the plain cash balance
+# (مانده قابل معامله) — only a fallback, since blocks are not deducted from it.
+_BUY_POWER_KEYS = ("buyPowerT0", "t0", "buyPowerT1", "t1", "buyPowerT2", "t2")
+
+
+def buying_power(money: dict) -> int | None:
+    """Buying power (RIAL) from an /easy/api/money body; None when absent."""
+    if not isinstance(money, dict):
+        return None
+    for key in _BUY_POWER_KEYS:
+        value = money.get(key)
+        if isinstance(value, (int, float)):
+            return int(value)
+    return None
 
 
 class EasyApiError(RuntimeError):
@@ -349,6 +368,15 @@ class EasyApiClient:
         except (TypeError, ValueError):
             rate = DEFAULT_BUY_COMMISSION
         return rate
+
+    # ── account money ──────────────────────────────────────
+    def money(self) -> dict:
+        """Balances in RIAL: buyPowerT0 = قدرت خرید, t0 = مانده قابل معامله
+        (captured live 2026-10-16)."""
+        data = self._request("GET", "/easy/api/money")
+        if not isinstance(data, dict):
+            raise EasyApiError(f"money response is not an object: {str(data)[:120]}")
+        return data
 
     # ── order: submit ──────────────────────────────────────
     @staticmethod

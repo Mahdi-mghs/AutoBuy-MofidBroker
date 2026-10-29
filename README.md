@@ -130,6 +130,29 @@ still in flight at 08:45:00 when the book opens. After the open it has
 near the front of the buy queue. An earlier version treated `11000` as a
 rejection and gave up 3 s before the open on a real-money run.
 
+### Balance check and the pre-burst review
+
+Before the burst, the bot reads the account money (`GET /easy/api/money`, RIAL)
+and prints what it is about to buy:
+
+```
+Order review:
+  symbol        فولاد (IRO1FOLD0001)
+  quantity      1 share(s)
+  price         4,540 Rial (454 Toman)  [ceiling]
+  commission    0.3712% → 17 Rial (1 Toman)
+  order value   4,557 Rial (455 Toman)
+  buying power  1,261,209,968 Rial (126,120,996 Toman)
+  balance after 1,261,205,411 Rial (126,120,541 Toman)
+```
+
+If the order value is larger than the buying power (قدرت خرید, `buyPowerT0`), you
+get a **warning** — at preparation time and again in the review — but the order
+is still submitted: the broker is the final judge (a credit line can cover the
+gap, and a real refusal stops the burst anyway). The balance is read during
+preparation, *before* the clock wait, so the burst pays no extra round trip on
+the opening millisecond.
+
 ### Reuse the cached API token (skip the login)
 
 ```bash
@@ -213,6 +236,7 @@ without submitting. See [docs/adr/003](docs/adr/003-real-browser-testing-without
 - [ADR-005 — Cached API token (skip the login)](docs/adr/005-cached-api-token.md)
 - [ADR-006 — Order cadence and the order window (measured)](docs/adr/006-order-cadence-and-window.md)
 - [ADR-007 — Graceful shutdown on Ctrl+C](docs/adr/007-graceful-shutdown-on-ctrl-c.md)
+- [ADR-008 — Balance check and the pre-burst order review](docs/adr/008-balance-check-and-order-review.md)
 - [Glossary](docs/glossary.md) — trading terms (Persian/English) + bot internals
 
 ---
